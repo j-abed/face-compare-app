@@ -1,7 +1,7 @@
 {
   "name": "face-compare-app",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,9 +9,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "download-models": "bash scripts/download-models.sh",
-    "download-samples": "bash scripts/download-samples.sh",
-    "download-samples-node": "node scripts/download-samples.js",
-    "prepare-samples": "bash scripts/create-sample-variants.sh"
+    "curate-lfw": "node scripts/curate-lfw.js"
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.22.0",

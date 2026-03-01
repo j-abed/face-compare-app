@@ -13,6 +13,7 @@
   --green: #34d399;
   --green-glow: rgba(52, 211, 153, 0.25);
   --red: #f87171;
+  --yellow: #fbbf24;
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
@@ -29,22 +30,21 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
-*, *::before, *::after {
-  box-sizing: border-box;
-}
+*, *::before, *::after { box-sizing: border-box; }
 
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  background:
+    radial-gradient(ellipse 80% 60% at 10% 20%, rgba(108, 123, 255, 0.07) 0%, transparent 50%),
+    radial-gradient(ellipse 60% 50% at 90% 70%, rgba(124, 77, 255, 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse 70% 50% at 50% 100%, rgba(52, 211, 153, 0.04) 0%, transparent 50%),
+    var(--bg-primary);
+  background-attachment: fixed;
 }
 
-h1, h2, h3, h4 {
-  margin: 0;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-}
-
+h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.02em; }
 h1 { font-size: 2rem; line-height: 1.2; }
 
 button {
@@ -70,4 +70,31 @@ button:active { transform: scale(0.98); }
 button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+/* Dark-theme scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-elevated);
+  border-radius: 4px;
+  border: 2px solid var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+@supports (scrollbar-color: auto) {
+  * {
+    scrollbar-color: var(--bg-elevated) var(--bg-secondary);
+    scrollbar-width: thin;
+  }
 }

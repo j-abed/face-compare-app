@@ -1,8 +1,8 @@
 import * as faceapi from 'face-api.js';
 
 const MODEL_BASE = '/models';
-const SAME_PERSON_THRESHOLD = 0.5;
-const COSINE_GATE = 0.90;
+const SAME_PERSON_THRESHOLD = 0.56;
+const COSINE_GATE = 0.92;
 const MIN_FACE_PIXELS = 40;
 const UPSCALE_MIN = 200;
 
@@ -432,7 +432,7 @@ function buildFeatureRegions(landmarks: faceapi.FaceLandmarks68): FeatureRegions
 // ---------------------------------------------------------------------------
 
 function distanceToScore(distance: number): number {
-  const sigma = 0.55;
+  const sigma = 0.60;
   return Math.exp(-(distance * distance) / (2 * sigma * sigma));
 }
 
@@ -541,7 +541,7 @@ function computeConfidence(
   const detectionQuality = Math.min(detConf1, detConf2);
 
   const gap = Math.abs(distance - SAME_PERSON_THRESHOLD);
-  const sigma = 0.15;
+  const sigma = 0.20;
   const decisiveness = 1 - Math.exp(-(gap * gap) / (2 * sigma * sigma));
 
   const isSame = distance < SAME_PERSON_THRESHOLD;
@@ -550,7 +550,7 @@ function computeConfidence(
     : Math.min(1, (1 - cosine) / 0.25);
 
   const cosineSaysSame = cosine > COSINE_GATE;
-  const signalsAgree = isSame === cosineSaysSame ? 1.0 : 0.4;
+  const signalsAgree = isSame === cosineSaysSame ? 1.0 : 0.3 + 0.4 * (1 - Math.abs(distance - SAME_PERSON_THRESHOLD) / 0.3);
 
   const confidence =
     detectionQuality * 0.15 +
@@ -665,7 +665,7 @@ export async function compareFaces(
   const landmarkAlign = sameUrl ? 1 : procrustesDistance(result1.landmarks, result2.landmarks);
   const descriptorScore = distanceToScore(distance);
 
-  const score = descriptorScore * 0.80 + landmarkAlign * 0.12 + geoSim * 0.08;
+  const score = descriptorScore * 0.75 + landmarkAlign * 0.15 + geoSim * 0.10;
 
   // Quality warnings
   const qualityWarnings: string[] = [];
@@ -703,7 +703,7 @@ export async function compareFaces(
     verdict = 'same';
   } else if (distanceSaysSame !== cosineSaysSame) {
     verdict = 'inconclusive';
-  } else if (confidence < 0.40) {
+  } else if (confidence < 0.25) {
     verdict = 'inconclusive';
   } else {
     verdict = samePerson ? 'same' : 'different';

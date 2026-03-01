@@ -1,4 +1,13 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  lazy,
+  Suspense,
+  type ReactNode,
+  type DragEvent,
+} from 'react'
 import {
   compareFaces,
   type CompareResult,
@@ -7,6 +16,376 @@ import {
   type FeatureRegions,
 } from './faceComparison'
 import './App.css'
+
+/* ─── Lazy-loaded BenchmarkPanel (may not exist yet) ───────────── */
+
+const BenchmarkPanel = lazy(() =>
+  import('./BenchmarkPanel').catch(() => ({
+    default: () => (
+      <div className="benchmark-fallback">
+        <div className="benchmark-fallback-icon">&#128295;</div>
+        <h3>Benchmark Coming Soon</h3>
+        <p>The benchmark panel is still being built. Check back shortly.</p>
+      </div>
+    ),
+  }))
+)
+
+/* ─── LFW Manifest types (matches lfwData.ts) ─────────────────── */
+
+interface LfwPerson {
+  name: string
+  images: string[]
+}
+
+interface LfwManifest {
+  source: string
+  license: string
+  people: LfwPerson[]
+  pairs: {
+    same: { person: string; image1: string; image2: string }[]
+    different: {
+      person1: string
+      image1: string
+      person2: string
+      image2: string
+    }[]
+  }
+}
+
+/* ─── Toast system ─────────────────────────────────────────────── */
+
+interface ToastItem {
+  id: number
+  message: string
+  type: 'error' | 'info'
+  exiting?: boolean
+}
+
+let toastIdCounter = 0
+
+function ToastContainer({
+  toasts,
+  onDismiss,
+}: {
+  toasts: ToastItem[]
+  onDismiss: (id: number) => void
+}) {
+  return (
+    <div className="toast-container">
+      {toasts.map((t) => (
+        <div
+          key={t.id}
+          className={`toast toast--${t.type}${t.exiting ? ' toast--exiting' : ''}`}
+        >
+          <span className="toast-icon">
+            {t.type === 'error' ? '\u26D4' : '\u2139\uFE0F'}
+          </span>
+          <div className="toast-body">
+            <p className="toast-message">{t.message}</p>
+          </div>
+          <button
+            className="toast-dismiss"
+            onClick={() => onDismiss(t.id)}
+            aria-label="Dismiss"
+          >
+            &times;
+          </button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function useToasts() {
+  const [toasts, setToasts] = useState<ToastItem[]>([])
+
+  const addToast = useCallback((message: string, type: 'error' | 'info' = 'error') => {
+    const id = ++toastIdCounter
+    setToasts((prev) => [...prev, { id, message, type }])
+    setTimeout(() => {
+      setToasts((prev) =>
+        prev.map((t) => (t.id === id ? { ...t, exiting: true } : t))
+      )
+      setTimeout(() => {
+        setToasts((prev) => prev.filter((t) => t.id !== id))
+      }, 300)
+    }, 5000)
+  }, [])
+
+  const dismissToast = useCallback((id: number) => {
+    setToasts((prev) =>
+      prev.map((t) => (t.id === id ? { ...t, exiting: true } : t))
+    )
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id))
+    }, 300)
+  }, [])
+
+  return { toasts, addToast, dismissToast }
+}
+
+/* ─── AnimatedNumber ───────────────────────────────────────────── */
+
+function AnimatedNumber({
+  value,
+  decimals = 0,
+  suffix = '',
+  duration = 500,
+}: {
+  value: number
+  decimals?: number
+  suffix?: string
+  duration?: number
+}) {
+  const [display, setDisplay] = useState(0)
+  const rafRef = useRef(0)
+
+  useEffect(() => {
+    const start = performance.now()
+    const from = 0
+    const to = value
+
+    const tick = (now: number) => {
+      const elapsed = now - start
+      const progress = Math.min(elapsed / duration, 1)
+      const eased = 1 - Math.pow(1 - progress, 3)
+      setDisplay(from + (to - from) * eased)
+      if (progress < 1) {
+        rafRef.current = requestAnimationFrame(tick)
+      }
+    }
+
+    rafRef.current = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(rafRef.current)
+  }, [value, duration])
+
+  return (
+    <>
+      {display.toFixed(decimals)}
+      {suffix}
+    </>
+  )
+}
+
+/* ─── CollapsibleSection ───────────────────────────────────────── */
+
+function CollapsibleSection({
+  title,
+  children,
+  defaultOpen = false,
+}: {
+  title: string
+  children: ReactNode
+  defaultOpen?: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+
+  return (
+    <div>
+      <button
+        className="collapsible-header"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <span className="collapsible-title">{title}</span>
+        <span className={`collapsible-chevron${open ? ' collapsible-chevron--open' : ''}`}>
+          &#9660;
+        </span>
+      </button>
+      <div className={`collapsible-body${open ? ' collapsible-body--open' : ''}`}>
+        {children}
+      </div>
+    </div>
+  )
+}
+
+/* ─── TabBar ───────────────────────────────────────────────────── */
+
+type TabId = 'compare' | 'benchmark' | 'gallery'
+
+const TABS: { id: TabId; label: string }[] = [
+  { id: 'compare', label: 'Compare' },
+  { id: 'benchmark', label: 'Benchmark' },
+  { id: 'gallery', label: 'Gallery' },
+]
+
+function TabBar({
+  active,
+  onChange,
+}: {
+  active: TabId
+  onChange: (tab: TabId) => void
+}) {
+  return (
+    <nav className="tab-bar" role="tablist">
+      {TABS.map((tab) => (
+        <button
+          key={tab.id}
+          role="tab"
+          aria-selected={active === tab.id}
+          className={`tab-btn${active === tab.id ? ' tab-btn--active' : ''}`}
+          onClick={() => onChange(tab.id)}
+        >
+          {tab.label}
+        </button>
+      ))}
+    </nav>
+  )
+}
+
+/* ─── DropZone ─────────────────────────────────────────────────── */
+
+function DropZone({
+  label,
+  imageUrl,
+  fileName,
+  onFile,
+  onRemove,
+  scanning,
+  comparing,
+  overlayCanvas,
+  showCaption,
+}: {
+  label: string
+  imageUrl: string | null
+  fileName: string | null
+  onFile: (file: File) => void
+  onRemove: () => void
+  scanning?: boolean
+  comparing?: boolean
+  overlayCanvas?: ReactNode
+  showCaption?: boolean
+}) {
+  const [dragOver, setDragOver] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const handleDrop = useCallback(
+    (e: DragEvent) => {
+      e.preventDefault()
+      setDragOver(false)
+      const file = e.dataTransfer.files?.[0]
+      if (file && file.type.startsWith('image/')) {
+        onFile(file)
+      }
+    },
+    [onFile]
+  )
+
+  const handleDragOver = useCallback((e: DragEvent) => {
+    e.preventDefault()
+    setDragOver(true)
+  }, [])
+
+  const handleDragLeave = useCallback((e: DragEvent) => {
+    e.preventDefault()
+    setDragOver(false)
+  }, [])
+
+  const handleClick = useCallback(() => {
+    if (!imageUrl) {
+      inputRef.current?.click()
+    }
+  }, [imageUrl])
+
+  const handleInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      if (file) onFile(file)
+      e.target.value = ''
+    },
+    [onFile]
+  )
+
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items
+      if (!items) return
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile()
+          if (file) {
+            onFile(file)
+            break
+          }
+        }
+      }
+    }
+    window.addEventListener('paste', handlePaste)
+    return () => window.removeEventListener('paste', handlePaste)
+  }, [onFile])
+
+  const dzClass = [
+    'dropzone',
+    dragOver && 'dropzone--dragover',
+    imageUrl && 'dropzone--has-file',
+    scanning && 'dropzone--scanning',
+    comparing && 'dropzone--comparing',
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  return (
+    <div className="upload-cell">
+      <label className="upload-label">{label}</label>
+      <div
+        className={dzClass}
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onClick={handleClick}
+      >
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/jpeg,image/png,image/webp"
+          onChange={handleInputChange}
+        />
+        {imageUrl ? (
+          <div className="dropzone-preview">
+            <div className="dropzone-img-wrap">
+              <div className="preview-wrap">
+                <img src={imageUrl} alt={label} className="preview-img" />
+              </div>
+              {scanning && (
+                <>
+                  <div className="scan-brackets">
+                    <span />
+                  </div>
+                  <span className="preview-scan-badge">Scanning</span>
+                </>
+              )}
+              {overlayCanvas}
+            </div>
+            <div className="dropzone-footer">
+              <span className="dropzone-filename">{fileName ?? 'Image'}</span>
+              <button
+                className="dropzone-remove"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  onRemove()
+                }}
+                aria-label="Remove image"
+              >
+                &times;
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <span className="dropzone-icon">&#128247;</span>
+            <span className="dropzone-text">
+              Drop photo here or <em>click to browse</em>
+            </span>
+          </>
+        )}
+      </div>
+      {showCaption && <p className="preview-caption">Detected face &amp; landmarks</p>}
+    </div>
+  )
+}
+
+/* ─── FeatureOverlayCanvas ─────────────────────────────────────── */
 
 function FeatureOverlayCanvas({
   regions,
@@ -36,7 +415,7 @@ function FeatureOverlayCanvas({
       points: { x: number; y: number }[],
       color: string,
       fillAlpha: number,
-      label?: string,
+      label?: string
     ) => {
       if (points.length < 2) return
       const sx = (p: { x: number; y: number }) => p.x * scaleX
@@ -80,6 +459,8 @@ function FeatureOverlayCanvas({
   )
 }
 
+/* ─── Constants ────────────────────────────────────────────────── */
+
 const PROGRESS_LABELS: Record<CompareProgressStep, string> = {
   loading_models: 'Loading face recognition models\u2026',
   loading_images: 'Loading images\u2026',
@@ -91,29 +472,52 @@ const PROGRESS_LABELS: Record<CompareProgressStep, string> = {
 const FEATURE_CHECKLIST = ['Eyes', 'Nose', 'Mouth', 'Jaw', 'Descriptor'] as const
 
 function getSamplePhotoUrls(): string[] {
-  const base = typeof window !== 'undefined' ? window.location.origin : ''
   return [
-    `${base}/sample1.jpg`,
-    `${base}/sample2.jpg`,
-    `${base}/sample3.jpg`,
-    `${base}/sample4.jpg`,
-    `${base}/sample5.jpg`,
-    `${base}/sample6.jpg`,
-    `${base}/sample7.jpg`,
-    `${base}/sample8.jpg`,
-    `${base}/sample9.jpg`,
-    `${base}/sample10.jpg`,
+    '/lfw/Tony_Blair/Tony_Blair_0001.jpg',
+    '/lfw/Tony_Blair/Tony_Blair_0003.jpg',
+    '/lfw/Hugo_Chavez/Hugo_Chavez_0001.jpg',
+    '/lfw/Hugo_Chavez/Hugo_Chavez_0005.jpg',
+    '/lfw/David_Beckham/David_Beckham_0001.jpg',
+    '/lfw/David_Beckham/David_Beckham_0004.jpg',
+    '/lfw/Tiger_Woods/Tiger_Woods_0001.jpg',
+    '/lfw/Tiger_Woods/Tiger_Woods_0005.jpg',
+    '/lfw/Jelena_Dokic/Jelena_Dokic_0001.jpg',
+    '/lfw/Jelena_Dokic/Jelena_Dokic_0003.jpg',
+    '/lfw/Hans_Blix/Hans_Blix_0001.jpg',
+    '/lfw/Pete_Sampras/Pete_Sampras_0001.jpg',
+    '/lfw/Steven_Spielberg/Steven_Spielberg_0001.jpg',
+    '/lfw/Liza_Minnelli/Liza_Minnelli_0001.jpg',
+    '/lfw/Jean_Chretien/Jean_Chretien_0001.jpg',
+    '/lfw/Silvio_Berlusconi/Silvio_Berlusconi_0001.jpg',
+    '/lfw/Yasser_Arafat/Yasser_Arafat_0001.jpg',
+    '/lfw/Paula_Radcliffe/Paula_Radcliffe_0001.jpg',
+    '/lfw/Wen_Jiabao/Wen_Jiabao_0001.jpg',
+    '/lfw/Gerry_Adams/Gerry_Adams_0001.jpg',
   ]
 }
 
 function pickTwoRandom<T>(arr: T[]): [T, T] {
   const copy = [...arr]
   for (let i = copy.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copy[i], copy[j]] = [copy[j], copy[i]]
+    const j = Math.floor(Math.random() * (i + 1))
+    ;[copy[i], copy[j]] = [copy[j], copy[i]]
   }
   return [copy[0], copy[1]]
 }
+
+/* ─── Ratio cell color helper ──────────────────────────────────── */
+
+function ratioCellClass(a: number, b: number): string {
+  if (a === 0 && b === 0) return ''
+  const avg = (Math.abs(a) + Math.abs(b)) / 2
+  if (avg === 0) return ''
+  const diff = Math.abs(a - b) / avg
+  if (diff <= 0.1) return 'cell-close'
+  if (diff > 0.25) return 'cell-divergent'
+  return ''
+}
+
+/* ─── SimilarityBar ────────────────────────────────────────────── */
 
 function SimilarityBar({ value }: { value: number }) {
   const pct = Math.round(value * 100)
@@ -134,9 +538,158 @@ function SimilarityBar({ value }: { value: number }) {
   )
 }
 
+/* ─── Gallery ──────────────────────────────────────────────────── */
+
+function Gallery({
+  onCompareSelected,
+}: {
+  onCompareSelected: (url1: string, url2: string) => void
+}) {
+  const [manifest, setManifest] = useState<LfwManifest | null>(null)
+  const [loadError, setLoadError] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [selected, setSelected] = useState<string[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/lfw/manifest.json')
+      .then((r) => {
+        if (!r.ok) throw new Error('Not found')
+        return r.json()
+      })
+      .then((data: LfwManifest) => {
+        if (!cancelled) {
+          setManifest(data)
+          setLoading(false)
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setLoadError(true)
+          setLoading(false)
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const toggleSelect = useCallback((url: string) => {
+    setSelected((prev) => {
+      if (prev.includes(url)) return prev.filter((u) => u !== url)
+      if (prev.length >= 2) return [prev[1], url]
+      return [...prev, url]
+    })
+  }, [])
+
+  const handleRandomPair = useCallback(() => {
+    if (!manifest?.people.length) return
+    const allImages = manifest.people.flatMap((p) => p.images)
+    if (allImages.length < 2) return
+    const [a, b] = pickTwoRandom(allImages)
+    setSelected([a, b])
+  }, [manifest])
+
+  if (loading) {
+    return (
+      <div className="benchmark-loading">
+        <div className="progress-spinner" />
+        <span>Loading gallery&hellip;</span>
+      </div>
+    )
+  }
+
+  if (loadError || !manifest) {
+    return (
+      <div className="gallery-empty">
+        <div className="gallery-empty-icon">&#128444;&#65039;</div>
+        <h3>Gallery Not Available Yet</h3>
+        <p>
+          The LFW sample gallery is still being prepared. The manifest file at{' '}
+          <code>/lfw/manifest.json</code> is not available yet.
+        </p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="gallery tab-content">
+      <div className="gallery-header">
+        <h2>LFW Sample Gallery</h2>
+        <div className="gallery-actions">
+          {selected.length > 0 && (
+            <span className="gallery-selection-info">
+              {selected.length}/2 selected
+            </span>
+          )}
+          <button type="button" onClick={handleRandomPair} className="sample-btn">
+            Random Pair
+          </button>
+          {selected.length === 2 && (
+            <button
+              type="button"
+              className="compare-btn"
+              onClick={() => onCompareSelected(selected[0], selected[1])}
+            >
+              Compare Selected
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="gallery-grid">
+        {manifest.people.map((person) => {
+          const MAX_THUMBS = 6
+          const visible = person.images.slice(0, MAX_THUMBS)
+          const remaining = person.images.length - MAX_THUMBS
+          return (
+            <div key={person.name} className="gallery-person-card">
+              <div className="gallery-person-name">
+                {person.name.replace(/_/g, ' ')}
+                <span className="gallery-person-count">{person.images.length} photos</span>
+              </div>
+              <div className="gallery-person-images">
+                {visible.map((img) => {
+                  const url = img
+                  const idx = selected.indexOf(url)
+                  const isSelected = idx >= 0
+                  return (
+                    <div
+                      key={img}
+                      className={`gallery-thumb-wrap${isSelected ? ' gallery-thumb-wrap--selected' : ''}`}
+                      onClick={() => toggleSelect(url)}
+                    >
+                      <img
+                        src={url}
+                        alt={person.name.replace(/_/g, ' ')}
+                        className="gallery-thumb"
+                        loading="lazy"
+                      />
+                      {isSelected && (
+                        <span className="gallery-thumb-badge">{idx + 1}</span>
+                      )}
+                    </div>
+                  )
+                })}
+                {remaining > 0 && (
+                  <div className="gallery-thumb-more">+{remaining}</div>
+                )}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+/* ─── Main App ─────────────────────────────────────────────────── */
+
 function App() {
+  const [activeTab, setActiveTab] = useState<TabId>('compare')
   const [image1, setImage1] = useState<string | null>(null)
   const [image2, setImage2] = useState<string | null>(null)
+  const [fileName1, setFileName1] = useState<string | null>(null)
+  const [fileName2, setFileName2] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [progressStep, setProgressStep] = useState<CompareProgressStep | null>(null)
   const [result, setResult] = useState<CompareResult | null>(null)
@@ -144,6 +697,7 @@ function App() {
   const [liveAnnotated2, setLiveAnnotated2] = useState<string | null>(null)
   const [comparingPayload, setComparingPayload] = useState<ProgressPayload | null>(null)
   const [checklistStep, setChecklistStep] = useState(-1)
+  const { toasts, addToast, dismissToast } = useToasts()
 
   useEffect(() => {
     if (progressStep !== 'comparing') {
@@ -158,27 +712,41 @@ function App() {
     return () => timeouts.forEach((t) => clearTimeout(t))
   }, [progressStep])
 
-  const handleFile = useCallback(
-    (file: File | null, setter: (url: string | null) => void) => {
-      if (result) setResult(null)
-      setLiveAnnotated1(null)
-      setLiveAnnotated2(null)
-      if (!file) {
-        setter(null)
-        return
-      }
-      const url = URL.createObjectURL(file)
-      setter(url)
+  const clearResults = useCallback(() => {
+    setResult(null)
+    setLiveAnnotated1(null)
+    setLiveAnnotated2(null)
+  }, [])
+
+  const handleFile1 = useCallback(
+    (file: File) => {
+      clearResults()
+      setFileName1(file.name)
+      setImage1(URL.createObjectURL(file))
     },
-    [result]
+    [clearResults]
   )
 
-  const onImage1Change = (e: React.ChangeEvent<HTMLInputElement>) => {
-    handleFile(e.target.files?.[0] ?? null, setImage1)
-  }
-  const onImage2Change = (e: React.ChangeEvent<HTMLInputElement>) => {
-    handleFile(e.target.files?.[0] ?? null, setImage2)
-  }
+  const handleFile2 = useCallback(
+    (file: File) => {
+      clearResults()
+      setFileName2(file.name)
+      setImage2(URL.createObjectURL(file))
+    },
+    [clearResults]
+  )
+
+  const removeImage1 = useCallback(() => {
+    clearResults()
+    setImage1(null)
+    setFileName1(null)
+  }, [clearResults])
+
+  const removeImage2 = useCallback(() => {
+    clearResults()
+    setImage2(null)
+    setFileName2(null)
+  }, [clearResults])
 
   const handleCompare = async () => {
     if (!image1 || !image2) return
@@ -197,12 +765,10 @@ function App() {
       })
       setResult(res)
     } catch (err) {
-      setResult({
-        samePerson: false,
-        verdict: 'inconclusive',
-        score: 0,
-        error: err instanceof Error ? err.message : 'Models failed to load. Check console.',
-      })
+      addToast(
+        err instanceof Error ? err.message : 'Models failed to load. Check console.',
+        'error'
+      )
     } finally {
       setLoading(false)
       setProgressStep(null)
@@ -212,14 +778,26 @@ function App() {
   const canCompare = image1 && image2 && !loading
 
   const useSamplePhotos = () => {
-    setResult(null)
-    setLiveAnnotated1(null)
-    setLiveAnnotated2(null)
+    clearResults()
     const urls = getSamplePhotoUrls()
     const [url1, url2] = pickTwoRandom(urls)
     setImage1(url1)
     setImage2(url2)
+    setFileName1(null)
+    setFileName2(null)
   }
+
+  const handleGalleryCompare = useCallback(
+    (url1: string, url2: string) => {
+      clearResults()
+      setImage1(url1)
+      setImage2(url2)
+      setFileName1(null)
+      setFileName2(null)
+      setActiveTab('compare')
+    },
+    [clearResults]
+  )
 
   const displayImage1 = liveAnnotated1 ?? result?.annotatedImage1 ?? image1
   const displayImage2 = liveAnnotated2 ?? result?.annotatedImage2 ?? image2
@@ -230,140 +808,134 @@ function App() {
 
   return (
     <div className="app">
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
+
       <header className="app-header">
         <h1>Face Comparison</h1>
-        <p className="subtitle">Upload two photos to check if they show the same person.</p>
+        <p className="subtitle">
+          Upload two photos to check if they show the same person.
+        </p>
       </header>
 
-      <div className="actions-top">
-        <button type="button" onClick={useSamplePhotos} className="sample-btn">
-          Use sample photos
-        </button>
-      </div>
+      <TabBar active={activeTab} onChange={setActiveTab} />
 
-      <div className="upload-row">
-        <div className="upload-cell">
-          <label className="upload-label">Photo 1</label>
-          <input
-            type="file"
-            accept="image/jpeg,image/png,image/webp"
-            onChange={onImage1Change}
-            className="file-input"
-          />
-          <div
-            className={`preview-wrap${isScanning1 ? ' preview-wrap--scanning' : ''}${isComparing ? ' preview-wrap--comparing' : ''}`}
-          >
-            {displayImage1 ? (
-              <img src={displayImage1} alt="Photo 1" className="preview-img" />
-            ) : (
-              <span className="placeholder">Choose image</span>
-            )}
-            {isScanning1 && (
-              <>
-                <div className="scan-brackets"><span /></div>
-                <span className="preview-scan-badge">Scanning</span>
-              </>
-            )}
-            {loading && isComparing && comparingPayload?.featureRegions1 && comparingPayload?.imageDimensions1 && (
-              <FeatureOverlayCanvas
-                regions={comparingPayload.featureRegions1}
-                imageDimensions={comparingPayload.imageDimensions1}
-              />
-            )}
+      {activeTab === 'compare' && (
+        <div className="tab-content" key="compare">
+          <div className="actions-top">
+            <button type="button" onClick={useSamplePhotos} className="sample-btn">
+              Use sample photos
+            </button>
           </div>
-          {(liveAnnotated1 || result?.annotatedImage1) && (
-            <p className="preview-caption">Detected face &amp; landmarks</p>
-          )}
-        </div>
 
-        <div className="upload-cell">
-          <label className="upload-label">Photo 2</label>
-          <input
-            type="file"
-            accept="image/jpeg,image/png,image/webp"
-            onChange={onImage2Change}
-            className="file-input"
-          />
-          <div
-            className={`preview-wrap${isScanning2 ? ' preview-wrap--scanning' : ''}${isComparing ? ' preview-wrap--comparing' : ''}`}
-          >
-            {displayImage2 ? (
-              <img src={displayImage2} alt="Photo 2" className="preview-img" />
-            ) : (
-              <span className="placeholder">Choose image</span>
-            )}
-            {isScanning2 && (
-              <>
-                <div className="scan-brackets"><span /></div>
-                <span className="preview-scan-badge">Scanning</span>
-              </>
-            )}
-            {loading && isComparing && comparingPayload?.featureRegions2 && comparingPayload?.imageDimensions2 && (
-              <FeatureOverlayCanvas
-                regions={comparingPayload.featureRegions2}
-                imageDimensions={comparingPayload.imageDimensions2}
-              />
-            )}
+          <div className="upload-row">
+            <DropZone
+              label="Photo 1"
+              imageUrl={displayImage1}
+              fileName={fileName1}
+              onFile={handleFile1}
+              onRemove={removeImage1}
+              scanning={isScanning1}
+              comparing={isComparing}
+              showCaption={!!(liveAnnotated1 || result?.annotatedImage1)}
+              overlayCanvas={
+                loading &&
+                isComparing &&
+                comparingPayload?.featureRegions1 &&
+                comparingPayload?.imageDimensions1 ? (
+                  <FeatureOverlayCanvas
+                    regions={comparingPayload.featureRegions1}
+                    imageDimensions={comparingPayload.imageDimensions1}
+                  />
+                ) : undefined
+              }
+            />
+            <DropZone
+              label="Photo 2"
+              imageUrl={displayImage2}
+              fileName={fileName2}
+              onFile={handleFile2}
+              onRemove={removeImage2}
+              scanning={isScanning2}
+              comparing={isComparing}
+              showCaption={!!(liveAnnotated2 || result?.annotatedImage2)}
+              overlayCanvas={
+                loading &&
+                isComparing &&
+                comparingPayload?.featureRegions2 &&
+                comparingPayload?.imageDimensions2 ? (
+                  <FeatureOverlayCanvas
+                    regions={comparingPayload.featureRegions2}
+                    imageDimensions={comparingPayload.imageDimensions2}
+                  />
+                ) : undefined
+              }
+            />
           </div>
-          {(liveAnnotated2 || result?.annotatedImage2) && (
-            <p className="preview-caption">Detected face &amp; landmarks</p>
-          )}
-        </div>
-      </div>
 
-      {loading && progressStep && (
-        <div className="progress-box">
-          <div className="progress-header">
-            <div className="progress-spinner" aria-hidden />
-            <p className="progress-text">{PROGRESS_LABELS[progressStep]}</p>
+          {loading && progressStep && (
+            <div className="progress-box">
+              <div className="progress-header">
+                <div className="progress-spinner" aria-hidden />
+                <p className="progress-text">{PROGRESS_LABELS[progressStep]}</p>
+              </div>
+              {progressStep === 'comparing' && (
+                <>
+                  <p className="progress-comparing-desc">
+                    Comparing face descriptors and landmark geometry.
+                  </p>
+                  <ul className="feature-checklist" aria-label="Features being compared">
+                    {FEATURE_CHECKLIST.map((label, i) => (
+                      <li
+                        key={label}
+                        className={
+                          i <= checklistStep ? 'feature-checklist-item--done' : ''
+                        }
+                      >
+                        {i < checklistStep
+                          ? '\u2713'
+                          : i === checklistStep
+                            ? '\u2026'
+                            : '\u25CB'}{' '}
+                        {label}
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+          )}
+
+          <div className="actions">
+            <button
+              onClick={handleCompare}
+              disabled={!canCompare}
+              className="compare-btn"
+            >
+              {loading ? 'Comparing\u2026' : 'Compare faces'}
+            </button>
           </div>
-          {progressStep === 'comparing' && (
-            <>
-              <p className="progress-comparing-desc">
-                Comparing face descriptors and landmark geometry.
-              </p>
-              <ul className="feature-checklist" aria-label="Features being compared">
-                {FEATURE_CHECKLIST.map((label, i) => (
-                  <li
-                    key={label}
-                    className={i <= checklistStep ? 'feature-checklist-item--done' : ''}
-                  >
-                    {i < checklistStep ? '\u2713' : i === checklistStep ? '\u2026' : '\u25CB'} {label}
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
-        </div>
-      )}
 
-      <div className="actions">
-        <button
-          onClick={handleCompare}
-          disabled={!canCompare}
-          className="compare-btn"
-        >
-          {loading ? 'Comparing\u2026' : 'Compare faces'}
-        </button>
-      </div>
-
-      {result && (
-        <div className={`result ${result.error ? 'result-error' : ''}`}>
-          {result.error ? (
-            <p className="result-message error">{result.error}</p>
-          ) : (
-            <>
+          {result && !result.error && (
+            <div className="result">
               {result.qualityWarnings && result.qualityWarnings.length > 0 && (
                 <div className="quality-warnings">
                   {result.qualityWarnings.map((w, i) => (
-                    <p key={i} className="quality-warning">{w}</p>
+                    <p key={i} className="quality-warning">
+                      {w}
+                    </p>
                   ))}
                 </div>
               )}
 
               <div className="result-verdict">
-                <div className={`verdict-icon verdict-icon--${result.verdict ?? (result.samePerson ? 'same' : 'different')}`}>
-                  {result.verdict === 'inconclusive' ? '?' : result.verdict === 'same' ? '\u2713' : '\u2717'}
+                <div
+                  className={`verdict-icon verdict-icon--${result.verdict ?? (result.samePerson ? 'same' : 'different')}`}
+                >
+                  {result.verdict === 'inconclusive'
+                    ? '?'
+                    : result.verdict === 'same'
+                      ? '\u2713'
+                      : '\u2717'}
                 </div>
                 <div>
                   <p className="result-message">
@@ -375,12 +947,20 @@ function App() {
                   </p>
                   {result.verdict === 'inconclusive' && (
                     <p className="verdict-explanation">
-                      The signals are ambiguous or confidence is too low to make a reliable determination.
+                      The signals are ambiguous or confidence is too low to make a
+                      reliable determination.
                     </p>
                   )}
                   {result.confidence != null && (
-                    <div className={`confidence-badge confidence-${result.confidenceLabel?.toLowerCase().replace(' ', '-')}`}>
-                      Confidence: {Math.round(result.confidence * 100)}% ({result.confidenceLabel})
+                    <div
+                      className={`confidence-badge confidence-${result.confidenceLabel?.toLowerCase().replace(' ', '-')}`}
+                    >
+                      Confidence:{' '}
+                      <AnimatedNumber
+                        value={Math.round(result.confidence * 100)}
+                        suffix="%"
+                      />{' '}
+                      ({result.confidenceLabel})
                     </div>
                   )}
                 </div>
@@ -392,28 +972,42 @@ function App() {
                 {result.euclideanDistance != null && (
                   <div className="metric-card">
                     <span className="metric-label">Descriptor distance</span>
-                    <span className="metric-value">{result.euclideanDistance.toFixed(4)}</span>
+                    <span className="metric-value">
+                      <AnimatedNumber value={result.euclideanDistance} decimals={4} />
+                    </span>
                     <div className="metric-sub">Lower = more similar</div>
                   </div>
                 )}
                 {result.cosineSimilarity != null && (
                   <div className="metric-card">
                     <span className="metric-label">Cosine similarity</span>
-                    <span className="metric-value">{result.cosineSimilarity.toFixed(4)}</span>
+                    <span className="metric-value">
+                      <AnimatedNumber value={result.cosineSimilarity} decimals={4} />
+                    </span>
                     <div className="metric-sub">Higher = more similar</div>
                   </div>
                 )}
                 {result.geometricSimilarity != null && (
                   <div className="metric-card">
                     <span className="metric-label">Geometric similarity</span>
-                    <span className="metric-value">{Math.round(result.geometricSimilarity * 100)}%</span>
+                    <span className="metric-value">
+                      <AnimatedNumber
+                        value={Math.round(result.geometricSimilarity * 100)}
+                        suffix="%"
+                      />
+                    </span>
                     <div className="metric-sub">Facial ratio comparison</div>
                   </div>
                 )}
                 {result.landmarkAlignment != null && (
                   <div className="metric-card">
                     <span className="metric-label">Landmark alignment</span>
-                    <span className="metric-value">{Math.round(result.landmarkAlignment * 100)}%</span>
+                    <span className="metric-value">
+                      <AnimatedNumber
+                        value={Math.round(result.landmarkAlignment * 100)}
+                        suffix="%"
+                      />
+                    </span>
                     <div className="metric-sub">Procrustes analysis</div>
                   </div>
                 )}
@@ -421,106 +1015,245 @@ function App() {
 
               {result.face1 && result.face2 && (
                 <div className="features-section">
-                  <h3 className="features-title">Feature comparison</h3>
-                  <p className="features-desc">
-                    Geometric measures from detected landmarks. Absolute values in pixels; normalized ratios are scale-invariant.
-                  </p>
-                  <table className="features-table">
-                    <thead>
-                      <tr>
-                        <th>Feature</th>
-                        <th>Photo 1</th>
-                        <th>Photo 2</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td>Detection confidence</td>
-                        <td>{(result.face1.detection.score * 100).toFixed(1)}%</td>
-                        <td>{(result.face2.detection.score * 100).toFixed(1)}%</td>
-                      </tr>
-                      <tr>
-                        <td>Face box (W&times;H)</td>
-                        <td>{Math.round(result.face1.features.boxWidth)} &times; {Math.round(result.face1.features.boxHeight)} px</td>
-                        <td>{Math.round(result.face2.features.boxWidth)} &times; {Math.round(result.face2.features.boxHeight)} px</td>
-                      </tr>
-                      <tr>
-                        <td>Inter-eye distance</td>
-                        <td>{result.face1.features.interEyeDistance.toFixed(1)} px</td>
-                        <td>{result.face2.features.interEyeDistance.toFixed(1)} px</td>
-                      </tr>
-                      <tr>
-                        <td>Face aspect ratio</td>
-                        <td>{result.face1.features.faceAspectRatio.toFixed(3)}</td>
-                        <td>{result.face2.features.faceAspectRatio.toFixed(3)}</td>
-                      </tr>
-                      <tr>
-                        <td>Nose length</td>
-                        <td>{result.face1.features.noseLength.toFixed(1)} px</td>
-                        <td>{result.face2.features.noseLength.toFixed(1)} px</td>
-                      </tr>
-                      <tr>
-                        <td>Mouth width</td>
-                        <td>{result.face1.features.mouthWidth.toFixed(1)} px</td>
-                        <td>{result.face2.features.mouthWidth.toFixed(1)} px</td>
-                      </tr>
-                      <tr>
-                        <td>Jaw width</td>
-                        <td>{result.face1.features.jawWidth.toFixed(1)} px</td>
-                        <td>{result.face2.features.jawWidth.toFixed(1)} px</td>
-                      </tr>
-                      <tr>
-                        <td>Eyebrow slope (L / R)</td>
-                        <td>{result.face1.features.eyebrowSlopeLeft.toFixed(3)} / {result.face1.features.eyebrowSlopeRight.toFixed(3)}</td>
-                        <td>{result.face2.features.eyebrowSlopeLeft.toFixed(3)} / {result.face2.features.eyebrowSlopeRight.toFixed(3)}</td>
-                      </tr>
-                    </tbody>
-                  </table>
+                  <CollapsibleSection title="Feature comparison">
+                    <p className="features-desc">
+                      Geometric measures from detected landmarks. Absolute values in
+                      pixels; normalized ratios are scale-invariant.
+                    </p>
+                    <table className="features-table">
+                      <thead>
+                        <tr>
+                          <th>Feature</th>
+                          <th>Photo 1</th>
+                          <th>Photo 2</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td>Detection confidence</td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.detection.score,
+                              result.face2!.detection.score
+                            )}
+                          >
+                            {(result.face1!.detection.score * 100).toFixed(1)}%
+                          </td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.detection.score,
+                              result.face2!.detection.score
+                            )}
+                          >
+                            {(result.face2!.detection.score * 100).toFixed(1)}%
+                          </td>
+                        </tr>
+                        <tr>
+                          <td>Face box (W&times;H)</td>
+                          <td>
+                            {Math.round(result.face1!.features.boxWidth)} &times;{' '}
+                            {Math.round(result.face1!.features.boxHeight)} px
+                          </td>
+                          <td>
+                            {Math.round(result.face2!.features.boxWidth)} &times;{' '}
+                            {Math.round(result.face2!.features.boxHeight)} px
+                          </td>
+                        </tr>
+                        <tr>
+                          <td>Inter-eye distance</td>
+                          <td>
+                            {result.face1!.features.interEyeDistance.toFixed(1)} px
+                          </td>
+                          <td>
+                            {result.face2!.features.interEyeDistance.toFixed(1)} px
+                          </td>
+                        </tr>
+                        <tr>
+                          <td>Face aspect ratio</td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.features.faceAspectRatio,
+                              result.face2!.features.faceAspectRatio
+                            )}
+                          >
+                            {result.face1!.features.faceAspectRatio.toFixed(3)}
+                          </td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.features.faceAspectRatio,
+                              result.face2!.features.faceAspectRatio
+                            )}
+                          >
+                            {result.face2!.features.faceAspectRatio.toFixed(3)}
+                          </td>
+                        </tr>
+                        <tr>
+                          <td>Nose length</td>
+                          <td>{result.face1!.features.noseLength.toFixed(1)} px</td>
+                          <td>{result.face2!.features.noseLength.toFixed(1)} px</td>
+                        </tr>
+                        <tr>
+                          <td>Mouth width</td>
+                          <td>{result.face1!.features.mouthWidth.toFixed(1)} px</td>
+                          <td>{result.face2!.features.mouthWidth.toFixed(1)} px</td>
+                        </tr>
+                        <tr>
+                          <td>Jaw width</td>
+                          <td>{result.face1!.features.jawWidth.toFixed(1)} px</td>
+                          <td>{result.face2!.features.jawWidth.toFixed(1)} px</td>
+                        </tr>
+                        <tr>
+                          <td>Eyebrow slope (L / R)</td>
+                          <td>
+                            {result.face1!.features.eyebrowSlopeLeft.toFixed(3)} /{' '}
+                            {result.face1!.features.eyebrowSlopeRight.toFixed(3)}
+                          </td>
+                          <td>
+                            {result.face2!.features.eyebrowSlopeLeft.toFixed(3)} /{' '}
+                            {result.face2!.features.eyebrowSlopeRight.toFixed(3)}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </CollapsibleSection>
 
-                  <h3 className="features-title" style={{ marginTop: '1.25rem' }}>Normalized ratios (scale-invariant)</h3>
-                  <p className="features-desc">
-                    Ratios normalized by inter-eye distance — directly comparable regardless of image size.
-                  </p>
-                  <table className="features-table">
-                    <thead>
-                      <tr>
-                        <th>Ratio</th>
-                        <th>Photo 1</th>
-                        <th>Photo 2</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr>
-                        <td>Nose / inter-eye</td>
-                        <td>{result.face1.features.noseToInterEye.toFixed(3)}</td>
-                        <td>{result.face2.features.noseToInterEye.toFixed(3)}</td>
-                      </tr>
-                      <tr>
-                        <td>Mouth / inter-eye</td>
-                        <td>{result.face1.features.mouthToInterEye.toFixed(3)}</td>
-                        <td>{result.face2.features.mouthToInterEye.toFixed(3)}</td>
-                      </tr>
-                      <tr>
-                        <td>Jaw / inter-eye</td>
-                        <td>{result.face1.features.jawToInterEye.toFixed(3)}</td>
-                        <td>{result.face2.features.jawToInterEye.toFixed(3)}</td>
-                      </tr>
-                      <tr>
-                        <td>Nose-to-mouth / inter-eye</td>
-                        <td>{result.face1.features.noseToMouthToInterEye.toFixed(3)}</td>
-                        <td>{result.face2.features.noseToMouthToInterEye.toFixed(3)}</td>
-                      </tr>
-                      <tr>
-                        <td>Eye / jaw ratio</td>
-                        <td>{result.face1.features.eyeToJawRatio.toFixed(3)}</td>
-                        <td>{result.face2.features.eyeToJawRatio.toFixed(3)}</td>
-                      </tr>
-                    </tbody>
-                  </table>
+                  <CollapsibleSection title="Normalized ratios (scale-invariant)">
+                    <p className="features-desc">
+                      Ratios normalized by inter-eye distance &mdash; directly
+                      comparable regardless of image size.
+                    </p>
+                    <table className="features-table">
+                      <thead>
+                        <tr>
+                          <th>Ratio</th>
+                          <th>Photo 1</th>
+                          <th>Photo 2</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td>Nose / inter-eye</td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.features.noseToInterEye,
+                              result.face2!.features.noseToInterEye
+                            )}
+                          >
+                            {result.face1!.features.noseToInterEye.toFixed(3)}
+                          </td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.features.noseToInterEye,
+                              result.face2!.features.noseToInterEye
+                            )}
+                          >
+                            {result.face2!.features.noseToInterEye.toFixed(3)}
+                          </td>
+                        </tr>
+                        <tr>
+                          <td>Mouth / inter-eye</td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.features.mouthToInterEye,
+                              result.face2!.features.mouthToInterEye
+                            )}
+                          >
+                            {result.face1!.features.mouthToInterEye.toFixed(3)}
+                          </td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.features.mouthToInterEye,
+                              result.face2!.features.mouthToInterEye
+                            )}
+                          >
+                            {result.face2!.features.mouthToInterEye.toFixed(3)}
+                          </td>
+                        </tr>
+                        <tr>
+                          <td>Jaw / inter-eye</td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.features.jawToInterEye,
+                              result.face2!.features.jawToInterEye
+                            )}
+                          >
+                            {result.face1!.features.jawToInterEye.toFixed(3)}
+                          </td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.features.jawToInterEye,
+                              result.face2!.features.jawToInterEye
+                            )}
+                          >
+                            {result.face2!.features.jawToInterEye.toFixed(3)}
+                          </td>
+                        </tr>
+                        <tr>
+                          <td>Nose-to-mouth / inter-eye</td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.features.noseToMouthToInterEye,
+                              result.face2!.features.noseToMouthToInterEye
+                            )}
+                          >
+                            {result.face1!.features.noseToMouthToInterEye.toFixed(3)}
+                          </td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.features.noseToMouthToInterEye,
+                              result.face2!.features.noseToMouthToInterEye
+                            )}
+                          >
+                            {result.face2!.features.noseToMouthToInterEye.toFixed(3)}
+                          </td>
+                        </tr>
+                        <tr>
+                          <td>Eye / jaw ratio</td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.features.eyeToJawRatio,
+                              result.face2!.features.eyeToJawRatio
+                            )}
+                          >
+                            {result.face1!.features.eyeToJawRatio.toFixed(3)}
+                          </td>
+                          <td
+                            className={ratioCellClass(
+                              result.face1!.features.eyeToJawRatio,
+                              result.face2!.features.eyeToJawRatio
+                            )}
+                          >
+                            {result.face2!.features.eyeToJawRatio.toFixed(3)}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </CollapsibleSection>
                 </div>
               )}
-            </>
+            </div>
           )}
+        </div>
+      )}
+
+      {activeTab === 'benchmark' && (
+        <div className="tab-content" key="benchmark">
+          <Suspense
+            fallback={
+              <div className="benchmark-loading">
+                <div className="progress-spinner" />
+                <span>Loading benchmark&hellip;</span>
+              </div>
+            }
+          >
+            <BenchmarkPanel />
+          </Suspense>
+        </div>
+      )}
+
+      {activeTab === 'gallery' && (
+        <div className="tab-content" key="gallery">
+          <Gallery onCompareSelected={handleGalleryCompare} />
         </div>
       )}
     </div>
