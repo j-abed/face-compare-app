@@ -1,7 +1,7 @@
 {
   "name": "face-compare-app",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -9,11 +9,12 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "download-models": "bash scripts/download-models.sh",
-    "curate-lfw": "node scripts/curate-lfw.js"
+    "download-onnx-models": "bash scripts/download-onnx-models.sh",
+    "curate-lfw": "node scripts/curate-lfw.js",
+    "download-lfw": "bash scripts/download-lfw.sh"
   },
   "dependencies": {
-    "@tensorflow/tfjs": "^4.22.0",
-    "face-api.js": "^0.22.2",
+    "onnxruntime-web": "^1.24.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
@@ -27,6 +28,8 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.4.24",
     "globals": "^16.5.0",
+    "onnxruntime-node": "^1.24.2",
+    "sharp": "^0.34.5",
     "typescript": "~5.9.3",
     "typescript-eslint": "^8.48.0",
     "vite": "^7.3.1"

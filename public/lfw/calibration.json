@@ -1,0 +1,9 @@
+{
+  "COSINE_SAME_THRESHOLD": 0.16,
+  "DISTANCE_SAME_THRESHOLD": 1.245,
+  "accuracyCosineOnly": 0.99,
+  "accuracyDistanceOnly": 0.99,
+  "pairsTotal": 80,
+  "pairsSame": 40,
+  "pairsDifferent": 40
+}

@@ -7,16 +7,41 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const PROJECT_ROOT = join(__dirname, '..');
 
-// Configurable paths
-const LFW_EXTRACTED_DIR = '/tmp/lfw-download/lfw_funneled';
-const PAIRS_FILE = '/tmp/lfw-download/pairs.txt';
+// Configurable paths (set LFW_SUBDIR env to override, e.g. lfw-deepfunneled or lfw_funneled)
+const LFW_BASE = '/tmp/lfw-download';
+const LFW_SUBDIR = process.env.LFW_SUBDIR || 'lfw_funneled';
+let LFW_EXTRACTED_DIR = join(LFW_BASE, LFW_SUBDIR);
+const PAIRS_FILE = join(LFW_BASE, 'pairs.txt');
+
+function resolveLfwExtractedDir() {
+  if (existsSync(LFW_EXTRACTED_DIR)) {
+    const subdirs = readdirSync(LFW_EXTRACTED_DIR, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name);
+    if (subdirs.length > 0) return LFW_EXTRACTED_DIR;
+  }
+  // Auto-detect: try common names (both hyphen and underscore)
+  for (const name of ['lfw-deepfunneled', 'lfw_funneled', 'lfw-funneled', 'lfw']) {
+    const candidate = join(LFW_BASE, name);
+    if (existsSync(candidate)) {
+      const subdirs = readdirSync(candidate, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name);
+      if (subdirs.length > 0) {
+        LFW_EXTRACTED_DIR = candidate;
+        return LFW_EXTRACTED_DIR;
+      }
+    }
+  }
+  return null;
+}
 const OUTPUT_DIR = join(PROJECT_ROOT, 'public', 'lfw');
 const MANIFEST_PATH = join(OUTPUT_DIR, 'manifest.json');
 
-// How many people to select
-const TARGET_PEOPLE = 20;
-const TARGET_SAME_PAIRS = 20;
-const TARGET_DIFF_PAIRS = 20;
+// How many people to select (larger = less overfitting to benchmark)
+const TARGET_PEOPLE = 40;
+const TARGET_SAME_PAIRS = 40;
+const TARGET_DIFF_PAIRS = 40;
 
 function parsePairs(pairsPath) {
   const content = readFileSync(pairsPath, 'utf-8').trim();
@@ -123,11 +148,9 @@ function selectDiversePeople(samePairs, diffPairs) {
     return picked;
   }
 
-  // Pick 3-4 people with many photos (good for benchmarking)
-  pickFromPool(veryHigh, 3);
-  // Pick 5-6 from high range
-  pickFromPool(high, 5);
-  // Fill remaining from moderate
+  // Pick people with many photos (good for benchmarking)
+  pickFromPool(veryHigh, 6);
+  pickFromPool(high, 10);
   pickFromPool(moderate, TARGET_PEOPLE - selected.length);
 
   // If still under target, pick from any remaining candidates
@@ -273,6 +296,38 @@ function copyImages(manifest) {
 // Main
 console.log('=== LFW Dataset Curation ===\n');
 
+const resolvedDir = resolveLfwExtractedDir();
+if (!resolvedDir) {
+  console.error(`ERROR: No LFW image directory found.`);
+  console.error(`  Looked at: ${LFW_EXTRACTED_DIR}`);
+  if (existsSync(LFW_BASE)) {
+    const contents = readdirSync(LFW_BASE);
+    console.error(`  Contents of ${LFW_BASE}: ${contents.join(', ') || '(empty)'}`);
+    const hasTgz = contents.some((f) => f.endsWith('.tgz'));
+    if (hasTgz) {
+      console.error('\n  You have a .tgz file but it may not be extracted. Extract it with:');
+      console.error(`  cd ${LFW_BASE} && tar -xzf <filename>.tgz`);
+      console.error('  Then from your project directory run: npm run curate-lfw');
+    }
+    if (contents.length > 0 && !hasTgz) {
+      console.error('\n  Try: LFW_SUBDIR=<folder-name> npm run curate-lfw');
+    }
+  } else {
+    console.error(`  Directory ${LFW_BASE} does not exist.`);
+  }
+  console.error('\n  To download LFW: npm run download-lfw');
+  process.exit(1);
+}
+LFW_EXTRACTED_DIR = resolvedDir;
+console.log(`Using: ${LFW_EXTRACTED_DIR}`);
+console.log(`Pairs: ${PAIRS_FILE}\n`);
+
+if (!existsSync(PAIRS_FILE)) {
+  console.error(`ERROR: pairs.txt not found at ${PAIRS_FILE}`);
+  console.error('  Run: npm run download-lfw');
+  process.exit(1);
+}
+
 console.log('Parsing pairs.txt...');
 const { samePairs, diffPairs } = parsePairs(PAIRS_FILE);
 console.log(`  Found ${samePairs.length} same-person pairs`);
@@ -293,6 +348,13 @@ mkdirSync(OUTPUT_DIR, { recursive: true });
 const totalCopied = copyImages(manifest);
 
 console.log(`  Copied ${totalCopied} images`);
+
+if (manifest.people.length === 0 || totalCopied === 0) {
+  console.error('\nERROR: No images found. Ensure LFW is downloaded and extracted:');
+  console.error('  npm run download-lfw');
+  console.error('  LFW_SUBDIR=lfw-deepfunneled npm run curate-lfw');
+  process.exit(1);
+}
 
 console.log('\nWriting manifest.json...');
 writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2));

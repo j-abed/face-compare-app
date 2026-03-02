@@ -10,11 +10,14 @@ import {
 } from 'react'
 import {
   compareFaces,
+  loadModels,
   type CompareResult,
   type CompareProgressStep,
   type ProgressPayload,
   type FeatureRegions,
 } from './faceComparison'
+import { saveComparison } from './historyStore'
+import { WebcamCapture } from './components/WebcamCapture'
 import './App.css'
 
 /* ─── Lazy-loaded BenchmarkPanel (may not exist yet) ───────────── */
@@ -30,6 +33,9 @@ const BenchmarkPanel = lazy(() =>
     ),
   }))
 )
+
+const IdentifyPanel = lazy(() => import('./components/IdentifyPanel'))
+const HistoryPanel = lazy(() => import('./components/HistoryPanel'))
 
 /* ─── LFW Manifest types (matches lfwData.ts) ─────────────────── */
 
@@ -182,19 +188,23 @@ function CollapsibleSection({
   const [open, setOpen] = useState(defaultOpen)
 
   return (
-    <div>
+    <div className="collapsible-section" data-open={open}>
       <button
+        type="button"
         className="collapsible-header"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
         <span className="collapsible-title">{title}</span>
-        <span className={`collapsible-chevron${open ? ' collapsible-chevron--open' : ''}`}>
+        <span className={`collapsible-chevron${open ? ' collapsible-chevron--open' : ''}`} aria-hidden>
           &#9660;
         </span>
       </button>
-      <div className={`collapsible-body${open ? ' collapsible-body--open' : ''}`}>
-        {children}
+      <div
+        className={`collapsible-body${open ? ' collapsible-body--open' : ''}`}
+        style={open ? { maxHeight: 3000 } : undefined}
+      >
+        <div className="collapsible-body-inner">{children}</div>
       </div>
     </div>
   )
@@ -202,12 +212,14 @@ function CollapsibleSection({
 
 /* ─── TabBar ───────────────────────────────────────────────────── */
 
-type TabId = 'compare' | 'benchmark' | 'gallery'
+type TabId = 'compare' | 'benchmark' | 'identify' | 'gallery' | 'history'
 
 const TABS: { id: TabId; label: string }[] = [
   { id: 'compare', label: 'Compare' },
   { id: 'benchmark', label: 'Benchmark' },
+  { id: 'identify', label: 'Identify' },
   { id: 'gallery', label: 'Gallery' },
+  { id: 'history', label: 'History' },
 ]
 
 function TabBar({
@@ -217,15 +229,39 @@ function TabBar({
   active: TabId
   onChange: (tab: TabId) => void
 }) {
+  const tabListRef = useRef<HTMLDivElement>(null)
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent, index: number) => {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+        e.preventDefault()
+        const prev = (index - 1 + TABS.length) % TABS.length
+        onChange(TABS[prev].id)
+        ;(tabListRef.current?.querySelectorAll('button')[prev] as HTMLButtonElement)?.focus()
+      } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+        e.preventDefault()
+        const next = (index + 1) % TABS.length
+        onChange(TABS[next].id)
+        ;(tabListRef.current?.querySelectorAll('button')[next] as HTMLButtonElement)?.focus()
+      }
+    },
+    [onChange]
+  )
+
   return (
-    <nav className="tab-bar" role="tablist">
-      {TABS.map((tab) => (
+    <nav className="tab-bar" role="tablist" aria-label="Main navigation" ref={tabListRef}>
+      {TABS.map((tab, index) => (
         <button
           key={tab.id}
           role="tab"
           aria-selected={active === tab.id}
+          aria-label={`${tab.label} tab`}
+          id={`tab-${tab.id}`}
+          aria-controls={`tabpanel-${tab.id}`}
+          tabIndex={active === tab.id ? 0 : -1}
           className={`tab-btn${active === tab.id ? ' tab-btn--active' : ''}`}
           onClick={() => onChange(tab.id)}
+          onKeyDown={(e) => handleKeyDown(e, index)}
         >
           {tab.label}
         </button>
@@ -236,28 +272,49 @@ function TabBar({
 
 /* ─── DropZone ─────────────────────────────────────────────────── */
 
+type QualityBadgeLevel = 'good' | 'minor' | 'major'
+
+function getQualityBadgeLevel(warnings: string[] | undefined): QualityBadgeLevel {
+  if (!warnings || warnings.length === 0) return 'good'
+  const hasMajor = warnings.some(
+    (w) =>
+      /over-exposed|under-exposed|too bright|too dark|outside|occlusion|very small/i.test(w)
+  )
+  if (hasMajor) return 'major'
+  return 'minor'
+}
+
 function DropZone({
   label,
   imageUrl,
   fileName,
   onFile,
   onRemove,
+  onImageUrl,
+  addToast,
   scanning,
   comparing,
   overlayCanvas,
   showCaption,
+  qualityWarnings,
 }: {
   label: string
   imageUrl: string | null
   fileName: string | null
   onFile: (file: File) => void
   onRemove: () => void
+  onImageUrl?: (blobUrl: string, filename?: string) => void
+  addToast?: (message: string, type?: 'error' | 'info') => void
   scanning?: boolean
   comparing?: boolean
   overlayCanvas?: ReactNode
   showCaption?: boolean
+  qualityWarnings?: string[]
 }) {
   const [dragOver, setDragOver] = useState(false)
+  const [urlInput, setUrlInput] = useState('')
+  const [urlLoading, setUrlLoading] = useState(false)
+  const [showWebcam, setShowWebcam] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
   const handleDrop = useCallback(
@@ -297,6 +354,40 @@ function DropZone({
     [onFile]
   )
 
+  const handleLoadFromUrl = useCallback(async () => {
+    const url = urlInput.trim()
+    if (!url) return
+    setUrlLoading(true)
+    try {
+      const res = await fetch(url, { mode: 'cors' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const blob = await res.blob()
+      if (!blob.type.startsWith('image/')) {
+        throw new Error('URL does not point to an image')
+      }
+      const file = new File([blob], 'image-from-url.jpg', { type: blob.type })
+      onFile(file)
+      setUrlInput('')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('Failed to fetch') || msg.includes('CORS') || msg.includes('NetworkError')) {
+        addToast?.('Could not load image from URL. The server may block cross-origin requests.', 'error')
+      } else {
+        addToast?.(msg, 'error')
+      }
+    } finally {
+      setUrlLoading(false)
+    }
+  }, [urlInput, onFile, addToast])
+
+  const handleWebcamCapture = useCallback(
+    (blobUrl: string) => {
+      onImageUrl?.(blobUrl, 'webcam-capture.jpg')
+      setShowWebcam(false)
+    },
+    [onImageUrl]
+  )
+
   useEffect(() => {
     const handlePaste = (e: ClipboardEvent) => {
       const items = e.clipboardData?.items
@@ -334,6 +425,19 @@ function DropZone({
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onClick={handleClick}
+        role={imageUrl ? undefined : 'button'}
+        tabIndex={imageUrl ? undefined : 0}
+        aria-label={`${label} drop zone. Drop an image or click to browse.`}
+        onKeyDown={
+          imageUrl
+            ? undefined
+            : (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  inputRef.current?.click()
+                }
+              }
+        }
       >
         <input
           ref={inputRef}
@@ -344,15 +448,23 @@ function DropZone({
         {imageUrl ? (
           <div className="dropzone-preview">
             <div className="dropzone-img-wrap">
+              {qualityWarnings !== undefined && (
+                <span
+                  className={`quality-badge quality-badge--${getQualityBadgeLevel(qualityWarnings)}`}
+                  title={qualityWarnings.length > 0 ? qualityWarnings.join('\n') : 'Good quality'}
+                >
+                  {qualityWarnings.length === 0 ? '\u2713' : '\u26A0'}
+                </span>
+              )}
               <div className="preview-wrap">
                 <img src={imageUrl} alt={label} className="preview-img" />
               </div>
               {scanning && (
                 <>
-                  <div className="scan-brackets">
+                  <div className="scan-brackets" aria-label="Scanning face in image" aria-live="polite">
                     <span />
                   </div>
-                  <span className="preview-scan-badge">Scanning</span>
+                  <span className="preview-scan-badge" aria-hidden>Scanning</span>
                 </>
               )}
               {overlayCanvas}
@@ -380,7 +492,42 @@ function DropZone({
           </>
         )}
       </div>
+      <div className="dropzone-url-row">
+        <input
+          type="url"
+          className="dropzone-url-input"
+          placeholder="Or paste image URL"
+          value={urlInput}
+          onChange={(e) => setUrlInput(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && handleLoadFromUrl()}
+        />
+        <button
+          type="button"
+          className="dropzone-url-load"
+          onClick={handleLoadFromUrl}
+          disabled={!urlInput.trim() || urlLoading}
+        >
+          {urlLoading ? 'Loading…' : 'Load'}
+        </button>
+        <button
+          type="button"
+          className="dropzone-camera-btn"
+          onClick={(e) => {
+            e.stopPropagation()
+            setShowWebcam(true)
+          }}
+          aria-label="Capture from camera"
+          title="Capture from camera"
+        >
+          <span className="dropzone-camera-icon" aria-hidden>📷</span>
+        </button>
+      </div>
       {showCaption && <p className="preview-caption">Detected face &amp; landmarks</p>}
+      <WebcamCapture
+        isOpen={showWebcam}
+        onClose={() => setShowWebcam(false)}
+        onCapture={handleWebcamCapture}
+      />
     </div>
   )
 }
@@ -592,9 +739,25 @@ function Gallery({
 
   if (loading) {
     return (
-      <div className="benchmark-loading">
-        <div className="progress-spinner" />
-        <span>Loading gallery&hellip;</span>
+      <div className="gallery tab-content">
+        <div className="gallery-header">
+          <h2>LFW Sample Gallery</h2>
+        </div>
+        <div className="gallery-grid" aria-busy="true" aria-label="Loading gallery">
+          {Array.from({ length: 8 }).map((_, i) => (
+            <div key={i} className="gallery-person-card skeleton">
+              <div className="gallery-person-name" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: '0.25rem' }}>
+                <div className="skeleton-line skeleton-line--medium" />
+                <div className="skeleton-line skeleton-line--short" />
+              </div>
+              <div className="gallery-person-images">
+                {Array.from({ length: 6 }).map((_, j) => (
+                  <div key={j} className="skeleton-block" style={{ width: 60, height: 60, borderRadius: 8 }} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     )
   }
@@ -684,8 +847,15 @@ function Gallery({
 
 /* ─── Main App ─────────────────────────────────────────────────── */
 
+const THEME_KEY = 'face-compare-theme'
+
 function App() {
   const [activeTab, setActiveTab] = useState<TabId>('compare')
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    const saved = localStorage.getItem(THEME_KEY)
+    return saved === 'light' ? 'light' : 'dark'
+  })
+  const [modelsLoaded, setModelsLoaded] = useState(false)
   const [image1, setImage1] = useState<string | null>(null)
   const [image2, setImage2] = useState<string | null>(null)
   const [fileName1, setFileName1] = useState<string | null>(null)
@@ -697,7 +867,21 @@ function App() {
   const [liveAnnotated2, setLiveAnnotated2] = useState<string | null>(null)
   const [comparingPayload, setComparingPayload] = useState<ProgressPayload | null>(null)
   const [checklistStep, setChecklistStep] = useState(-1)
+  const [showAlignedOverlay, setShowAlignedOverlay] = useState(false)
   const { toasts, addToast, dismissToast } = useToasts()
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+    localStorage.setItem(THEME_KEY, theme)
+  }, [theme])
+
+  const toggleTheme = useCallback(() => {
+    setTheme((t) => (t === 'dark' ? 'light' : 'dark'))
+  }, [])
+
+  useEffect(() => {
+    loadModels().then(() => setModelsLoaded(true)).catch(() => {})
+  }, [])
 
   useEffect(() => {
     if (progressStep !== 'comparing') {
@@ -748,6 +932,30 @@ function App() {
     setFileName2(null)
   }, [clearResults])
 
+  const handleImageUrl1 = useCallback(
+    (blobUrl: string, filename?: string) => {
+      clearResults()
+      setImage1((prev) => {
+        if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev)
+        return blobUrl
+      })
+      setFileName1(filename ?? 'webcam-capture.jpg')
+    },
+    [clearResults]
+  )
+
+  const handleImageUrl2 = useCallback(
+    (blobUrl: string, filename?: string) => {
+      clearResults()
+      setImage2((prev) => {
+        if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev)
+        return blobUrl
+      })
+      setFileName2(filename ?? 'webcam-capture.jpg')
+    },
+    [clearResults]
+  )
+
   const handleCompare = async () => {
     if (!image1 || !image2) return
     setLoading(true)
@@ -764,11 +972,13 @@ function App() {
         if (step === 'comparing' && payload) setComparingPayload(payload)
       })
       setResult(res)
+      if (!res.error) {
+        saveComparison(res, image1, image2).catch(console.error)
+      }
     } catch (err) {
-      addToast(
-        err instanceof Error ? err.message : 'Models failed to load. Check console.',
-        'error'
-      )
+      const errMsg = err instanceof Error ? err.message : String(err)
+      setResult({ samePerson: false, verdict: 'inconclusive', score: 0, error: errMsg })
+      addToast(errMsg, 'error')
     } finally {
       setLoading(false)
       setProgressStep(null)
@@ -811,16 +1021,40 @@ function App() {
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
 
       <header className="app-header">
-        <h1>Face Comparison</h1>
-        <p className="subtitle">
-          Upload two photos to check if they show the same person.
-        </p>
+        <div className="app-header-inner">
+          <h1>Face Comparison</h1>
+          <p className="subtitle">
+            Upload two photos to check if they show the same person.
+          </p>
+        </div>
+        <div className="app-header-actions">
+          {modelsLoaded ? (
+            <span className="models-loaded" aria-label="Models loaded">
+              <span aria-hidden>✓</span>
+              <span>Ready</span>
+            </span>
+          ) : (
+            <span className="models-loading" aria-label="Loading face recognition models">
+              <span className="progress-spinner" aria-hidden />
+              Loading models…
+            </span>
+          )}
+          <button
+            type="button"
+            className="theme-toggle-btn"
+            onClick={toggleTheme}
+            aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+            title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
+          >
+            <span aria-hidden>{theme === 'dark' ? '☀️' : '🌙'}</span>
+          </button>
+        </div>
       </header>
 
       <TabBar active={activeTab} onChange={setActiveTab} />
 
       {activeTab === 'compare' && (
-        <div className="tab-content" key="compare">
+        <div className="tab-content" key="compare" role="tabpanel" id="tabpanel-compare" aria-labelledby="tab-compare">
           <div className="actions-top">
             <button type="button" onClick={useSamplePhotos} className="sample-btn">
               Use sample photos
@@ -834,9 +1068,12 @@ function App() {
               fileName={fileName1}
               onFile={handleFile1}
               onRemove={removeImage1}
+              onImageUrl={handleImageUrl1}
+              addToast={addToast}
               scanning={isScanning1}
               comparing={isComparing}
               showCaption={!!(liveAnnotated1 || result?.annotatedImage1)}
+              qualityWarnings={result ? (result.qualityWarnings1 ?? []) : undefined}
               overlayCanvas={
                 loading &&
                 isComparing &&
@@ -855,9 +1092,12 @@ function App() {
               fileName={fileName2}
               onFile={handleFile2}
               onRemove={removeImage2}
+              onImageUrl={handleImageUrl2}
+              addToast={addToast}
               scanning={isScanning2}
               comparing={isComparing}
               showCaption={!!(liveAnnotated2 || result?.annotatedImage2)}
+              qualityWarnings={result ? (result.qualityWarnings2 ?? []) : undefined}
               overlayCanvas={
                 loading &&
                 isComparing &&
@@ -915,6 +1155,14 @@ function App() {
             </button>
           </div>
 
+          {result && result.error && (
+            <div className="result">
+              <div className="quality-warnings">
+                <p className="quality-warning">Error: {result.error}</p>
+              </div>
+            </div>
+          )}
+
           {result && !result.error && (
             <div className="result">
               {result.qualityWarnings && result.qualityWarnings.length > 0 && (
@@ -927,9 +1175,16 @@ function App() {
                 </div>
               )}
 
-              <div className="result-verdict">
+              <div className="result-verdict" aria-live="polite" aria-atomic="true">
                 <div
                   className={`verdict-icon verdict-icon--${result.verdict ?? (result.samePerson ? 'same' : 'different')}`}
+                  aria-label={
+                    result.verdict === 'inconclusive'
+                      ? 'Inconclusive result'
+                      : result.verdict === 'same'
+                        ? 'Same person'
+                        : 'Different persons'
+                  }
                 >
                   {result.verdict === 'inconclusive'
                     ? '?'
@@ -1015,7 +1270,7 @@ function App() {
 
               {result.face1 && result.face2 && (
                 <div className="features-section">
-                  <CollapsibleSection title="Feature comparison">
+                  <CollapsibleSection key="feature-comparison" title="Feature comparison">
                     <p className="features-desc">
                       Geometric measures from detected landmarks. Absolute values in
                       pixels; normalized ratios are scale-invariant.
@@ -1117,7 +1372,7 @@ function App() {
                     </table>
                   </CollapsibleSection>
 
-                  <CollapsibleSection title="Normalized ratios (scale-invariant)">
+                  <CollapsibleSection key="normalized-ratios" title="Normalized ratios (scale-invariant)">
                     <p className="features-desc">
                       Ratios normalized by inter-eye distance &mdash; directly
                       comparable regardless of image size.
@@ -1237,7 +1492,7 @@ function App() {
       )}
 
       {activeTab === 'benchmark' && (
-        <div className="tab-content" key="benchmark">
+        <div className="tab-content" key="benchmark" role="tabpanel" id="tabpanel-benchmark" aria-labelledby="tab-benchmark">
           <Suspense
             fallback={
               <div className="benchmark-loading">
@@ -1251,9 +1506,39 @@ function App() {
         </div>
       )}
 
+      {activeTab === 'identify' && (
+        <div className="tab-content" key="identify" role="tabpanel" id="tabpanel-identify" aria-labelledby="tab-identify">
+          <Suspense
+            fallback={
+              <div className="benchmark-loading">
+                <div className="progress-spinner" />
+                <span>Loading identify&hellip;</span>
+              </div>
+            }
+          >
+            <IdentifyPanel />
+          </Suspense>
+        </div>
+      )}
+
       {activeTab === 'gallery' && (
-        <div className="tab-content" key="gallery">
+        <div className="tab-content" key="gallery" role="tabpanel" id="tabpanel-gallery" aria-labelledby="tab-gallery">
           <Gallery onCompareSelected={handleGalleryCompare} />
+        </div>
+      )}
+
+      {activeTab === 'history' && (
+        <div className="tab-content" key="history">
+          <Suspense
+            fallback={
+              <div className="benchmark-loading">
+                <div className="progress-spinner" />
+                <span>Loading history&hellip;</span>
+              </div>
+            }
+          >
+            <HistoryPanel />
+          </Suspense>
         </div>
       )}
     </div>

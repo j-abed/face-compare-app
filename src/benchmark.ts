@@ -16,6 +16,25 @@ export interface PairResult {
   error?: string;
 }
 
+export interface RocPoint {
+  threshold: number;
+  tpr: number;
+  fpr: number;
+}
+
+export interface DetPoint {
+  threshold: number;
+  fnr: number;
+  fpr: number;
+}
+
+export interface PerPersonAccuracy {
+  name: string;
+  accuracy: number;
+  total: number;
+  correct: number;
+}
+
 export interface BenchmarkResults {
   totalPairs: number;
   samePairs: number;
@@ -36,6 +55,10 @@ export interface BenchmarkResults {
   pairResults: PairResult[];
   totalTimeMs: number;
   avgTimePerPairMs: number;
+  rocData: RocPoint[];
+  detData: DetPoint[];
+  auc: number;
+  perPersonAccuracy: PerPersonAccuracy[];
 }
 
 export type BenchmarkProgress = {
@@ -182,6 +205,65 @@ export async function runBenchmark(
   const falsePositiveRate = safeDiv(fp, fp + tn);
   const falseNegativeRate = safeDiv(fn, fn + tp);
 
+  // Get similarity score in [-1, 1] for threshold sweep
+  function getSimilarity(pr: PairResult): number {
+    if (pr.result.cosineSimilarity != null) return pr.result.cosineSimilarity;
+    // score is [0,1], map to [-1,1]
+    return 2 * (pr.result.score ?? 0) - 1;
+  }
+
+  const rocData: RocPoint[] = [];
+  const detData: DetPoint[] = [];
+
+  for (let t = -1.0; t <= 1.0; t += 0.02) {
+    const threshold = Math.round(t * 100) / 100;
+    let tp_t = 0, fn_t = 0, fp_t = 0, tn_t = 0;
+    for (const pr of pairResults) {
+      const sim = getSimilarity(pr);
+      const predSame = sim >= threshold;
+      if (pr.isSame) {
+        if (predSame) tp_t++;
+        else fn_t++;
+      } else {
+        if (predSame) fp_t++;
+        else tn_t++;
+      }
+    }
+    const tpr = safeDiv(tp_t, tp_t + fn_t);
+    const fpr = safeDiv(fp_t, fp_t + tn_t);
+    const fnr = safeDiv(fn_t, fn_t + tp_t);
+    rocData.push({ threshold, tpr, fpr });
+    detData.push({ threshold, fnr, fpr });
+  }
+
+  // AUC via trapezoidal rule (ROC: integrate TPR over FPR, sorted by FPR ascending)
+  const rocSorted = [...rocData].sort((a, b) => a.fpr - b.fpr);
+  let auc = 0;
+  for (let i = 1; i < rocSorted.length; i++) {
+    const dx = rocSorted[i].fpr - rocSorted[i - 1].fpr;
+    const yAvg = (rocSorted[i].tpr + rocSorted[i - 1].tpr) / 2;
+    auc += dx * yAvg;
+  }
+
+  // Per-person accuracy (same-pairs only)
+  const personStats = new Map<string, { correct: number; total: number }>();
+  for (const pr of pairResults) {
+    if (!pr.isSame) continue;
+    const name = pr.personInfo;
+    const stats = personStats.get(name) ?? { correct: 0, total: 0 };
+    stats.total++;
+    if (pr.correct) stats.correct++;
+    personStats.set(name, stats);
+  }
+  const perPersonAccuracy: PerPersonAccuracy[] = Array.from(personStats.entries())
+    .map(([name, { correct, total }]) => ({
+      name,
+      accuracy: safeDiv(correct, total),
+      total,
+      correct,
+    }))
+    .sort((a, b) => a.accuracy - b.accuracy);
+
   return {
     totalPairs: total,
     samePairs: manifest.pairs.same.length,
@@ -202,5 +284,9 @@ export async function runBenchmark(
     pairResults,
     totalTimeMs,
     avgTimePerPairMs: safeDiv(totalTimeMs, completed),
+    rocData,
+    detData,
+    auc,
+    perPersonAccuracy,
   };
 }

@@ -1,15 +1,17 @@
-:root {
-  --bg-primary: #0f1117;
-  --bg-secondary: #181b24;
-  --bg-card: #1e2230;
+/* Dark theme (default) */
+:root,
+[data-theme="dark"] {
+  --bg-primary: #0d1117;
+  --bg-secondary: #161b22;
+  --bg-card: #161b22;
   --bg-elevated: #252a3a;
   --border-subtle: rgba(255, 255, 255, 0.06);
   --border-medium: rgba(255, 255, 255, 0.1);
   --text-primary: #e8eaf0;
   --text-secondary: #9ba1b0;
   --text-muted: #636b80;
-  --accent: #6c7bff;
-  --accent-glow: rgba(108, 123, 255, 0.35);
+  --accent: #6c63ff;
+  --accent-glow: rgba(108, 99, 255, 0.35);
   --green: #34d399;
   --green-glow: rgba(52, 211, 153, 0.25);
   --red: #f87171;
@@ -17,6 +19,7 @@
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
+  --bg-tab-bar: rgba(13, 17, 23, 0.85);
 
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   line-height: 1.5;
@@ -28,6 +31,27 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Light theme */
+[data-theme="light"] {
+  --bg-primary: #f6f8fa;
+  --bg-secondary: #ffffff;
+  --bg-card: #ffffff;
+  --bg-elevated: #f6f8fa;
+  --border-subtle: #d0d7de;
+  --border-medium: #d0d7de;
+  --text-primary: #24292f;
+  --text-secondary: #57606a;
+  --text-muted: #6e7781;
+  --accent: #6c63ff;
+  --accent-glow: rgba(108, 99, 255, 0.2);
+  --green: #1a7f37;
+  --green-glow: rgba(26, 127, 55, 0.15);
+  --red: #cf222e;
+  --yellow: #9a6700;
+  --bg-tab-bar: rgba(246, 248, 250, 0.9);
+  color-scheme: light;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -42,6 +66,14 @@ body {
     radial-gradient(ellipse 70% 50% at 50% 100%, rgba(52, 211, 153, 0.04) 0%, transparent 50%),
     var(--bg-primary);
   background-attachment: fixed;
+}
+
+[data-theme="light"] body {
+  background:
+    radial-gradient(ellipse 80% 60% at 10% 20%, rgba(108, 99, 255, 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse 60% 50% at 90% 70%, rgba(124, 77, 255, 0.05) 0%, transparent 50%),
+    radial-gradient(ellipse 70% 50% at 50% 100%, rgba(52, 211, 153, 0.03) 0%, transparent 50%),
+    var(--bg-primary);
 }
 
 h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -0.02em; }
@@ -96,5 +128,16 @@ button:focus-visible {
   * {
     scrollbar-color: var(--bg-elevated) var(--bg-secondary);
     scrollbar-width: thin;
+  }
+}
+
+/* Respect user preference for reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }
